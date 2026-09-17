@@ -254,7 +254,7 @@ final class App: NSObject, NSApplicationDelegate {
         let count = externalCount()
         let off = session.running || routing.running
         let recoveryPending = routing.recoveryUnconfirmed
-        status.title = "外屏 \(count) 台 · \(recoveryPending ? "内屏恢复未确认" : (routing.running ? "双外屏模式" : (off ? "内屏关闭会话中" : "未启用")))"
+        status.title = "外屏 \(count) 台 · \(recoveryPending ? "内屏恢复未确认" : (routing.running ? (routing.visualConfirmed ? "双外屏模式" : "等待画面确认") : (off ? "内屏关闭会话中" : "未启用")))"
         enable.isEnabled = !off && !recoveryPending && count > 0
         routeEnable.isEnabled = !off && !recoveryPending && count > 0
         disable.isEnabled = off || recoveryPending || builtinID().map { CGDisplayIsAsleep($0) != 0 } == true
@@ -271,10 +271,24 @@ final class App: NSObject, NSApplicationDelegate {
     @objc func trial() { begin(10) }
     @objc func route() {
         guard !session.running else { return }
-        if !routing.start(duration: 0) {
+        guard routing.start(duration: 0) else {
             let alert = NSAlert(); alert.messageText = "双外屏模式未启用"
-            alert.informativeText = routing.lastError; alert.runModal()
+            alert.informativeText = routing.lastError; alert.runModal(); tick(); return
         }
+        tick()
+        let alert = NSAlert(); alert.messageText = "两台外屏都有正常画面吗？"
+        alert.informativeText = "请检查两台外屏是否都亮起且色彩正常。30 秒内未确认，将自动恢复内屏。"
+        alert.addButton(withTitle: "恢复内屏")
+        alert.addButton(withTitle: "两台都有画面，保留")
+        let previewTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.routing.beat()
+            if !self.routing.running { NSApplication.shared.abortModal() }
+        }
+        RunLoop.main.add(previewTimer, forMode: .modalPanel)
+        let choice = alert.runModal()
+        previewTimer.invalidate(); alert.window.orderOut(nil)
+        if choice != .alertSecondButtonReturn || !routing.confirmVisibleOutputs() { turnOn() }
         tick()
     }
     @objc func turnOn() {
@@ -319,16 +333,35 @@ if args == ["self-test"] {
         (true, true, true, [2, 3], false)
     ]
     for c in routingCases {
-        guard routingAchieved(queryOK: c.0, physicallyOpen: c.1, builtinActive: c.2, activeExternalIDs: c.3) == c.4 else { exit(1) }
+        guard routingTopologyReady(queryOK: c.0, physicallyOpen: c.1, builtinActive: c.2, activeExternalIDs: c.3) == c.4 else { exit(1) }
     }
-    emit(["routingOutcomeCasesPassed": routingCases.count])
-} else if args.first == "--routing-guard", args.count == 2, let seconds = Double(args[1]), seconds >= 0, seconds.isFinite {
-    routingGuardian(duration: seconds)
-} else if args.first == "routing-trial", args.count == 2, let seconds = Double(args[1]), seconds >= 10, seconds <= 60 {
+    emit(["routingTopologyCasesPassed": routingCases.count])
+    // A stable enumeration is not a reason to retain a session with no picture.
+    let confirmationCases: [(Double?, Double, Bool, Bool)] = [
+        (nil, 100, false, false), (10, 39.9, false, false),
+        (10, 40, false, true), (10, 100, false, true), (10, 100, true, false)
+    ]
+    for c in confirmationCases {
+        guard routingConfirmationExpired(readyAt: c.0, now: c.1, confirmed: c.2) == c.3 else { exit(1) }
+    }
+    emit(["routingConfirmationCasesPassed": confirmationCases.count])
+} else if args.first == "--routing-child", args.count >= 4,
+          let group = Int32(args[1]), let timeout = UInt32(args[2]) {
+    routingChild(group: group, timeout: timeout, command: Array(args.dropFirst(3)))
+} else if ["--routing-recover", "--routing-prepare"].contains(args.first ?? ""), args.count == 2,
+          let data = Data(base64Encoded: args[1]), let saved = try? JSONDecoder().decode(BuiltinDisplayState.self, from: data) {
+    alarm(12)
+    let result = args[0] == "--routing-prepare" ? prepareBuiltinDisplayRecovery(saved) : restoreBuiltinDisplayState(saved)
+    if let data = try? JSONEncoder().encode(result) { FileHandle.standardOutput.write(data); print("") }
+    exit(result.restored ? 0 : 3)
+} else if args.first == "--routing-guard", args.count == 3, let seconds = Double(args[1]), seconds >= 0, seconds.isFinite {
+    routingGuardian(duration: seconds, savedState: args[2])
+} else if args.first == "routing-trial", args.count == 2, let seconds = Double(args[1]),
+          seconds == 0 || (seconds >= 10 && seconds <= 60) {
     let routing = RoutingSession()
     emit(["phase": "before", "snapshot": snapshot()])
     guard routing.start(duration: seconds) else { fputs("\(routing.lastError)\n", stderr); exit(2) }
-    emit(["phase": "routing_active", "snapshot": snapshot()])
+    emit(["phase": "routing_preview", "visualConfirmed": false, "snapshot": snapshot()])
     while routing.running { routing.beat(); Thread.sleep(forTimeInterval: 0.5) }
     let ok = routing.stop()
     emit(["phase": "restored", "verifiedLayoutAndWake": ok, "snapshot": snapshot()])
@@ -365,6 +398,6 @@ if args == ["self-test"] {
     app.delegate = delegate
     app.run()
 } else {
-    fputs("Usage: OpenClam [status | observe SECONDS | trial 5..60 | routing-trial 10..60 | probe-open | self-test]\n", stderr)
+    fputs("Usage: OpenClam [status | observe SECONDS | trial 5..60 | routing-trial 0|10..60 | probe-open | self-test]\n", stderr)
     exit(2)
 }

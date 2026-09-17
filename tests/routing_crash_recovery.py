@@ -17,11 +17,11 @@ def records():
 with path.open('w') as log:
     owner = subprocess.Popen([str(binary), 'routing-trial', '45'], stdout=log, stderr=log)
     try:
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             content = path.read_text()
             ready = ('layout: built-in display disconnected' in content if phase == 'applying'
-                     else any(r.get('routingGuardianActive') for r in records()))
+                     else any(r.get('routingGuardianPreview') for r in records()))
             if ready:
                 break
             if owner.poll() is not None:
@@ -31,7 +31,7 @@ with path.open('w') as log:
             raise RuntimeError('Crash point not reached')
         owner.kill()
         owner.wait(timeout=5)
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             restored = [r for r in records() if r.get('routingRestore')]
             if restored:

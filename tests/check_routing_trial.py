@@ -4,7 +4,7 @@ import sys
 
 records = [json.loads(s) for s in open(sys.argv[1]) if s.startswith('{')]
 phases = {r['phase']: r for r in records if 'phase' in r}
-before, active, restored = [phases[p]['snapshot'] for p in ('before', 'routing_active', 'restored')]
+before, active, restored = [phases[p]['snapshot'] for p in ('before', 'routing_preview', 'restored')]
 external = lambda s: {d['id'] for d in s['displays'] if not d['builtin'] and d['active']}
 assert active['displayQueryReturn'] == 0
 assert active['clamshell']['AppleClamshellState'] is False
@@ -13,10 +13,13 @@ assert not any(d['builtin'] and d['active'] for d in active['displays'])
 assert external(before).issubset(external(active))
 assert any(d['builtin'] and d['active'] and not d['asleep'] for d in restored['displays'])
 assert phases['restored']['verifiedLayoutAndWake']
+assert phases['routing_preview']['visualConfirmed'] is False
+assert any(r.get('restored') and r.get('stage') == 'verified' for r in records)
+assert any(r.get('stage') == 'prepared' and r.get('restored') for r in records)
 requests = [r for r in records if 'requestedState' in r]
 assert [r['requestedState'] for r in requests] == ['closed', 'open']
 assert requests[0]['registryID'] == requests[1]['registryID']
 assert all(r['result'] == 'submitted_not_verified' for r in requests)
-assert any(r.get('routingRestore') and r.get('reason') == 'trial_expired' for r in records)
-print('PASS: driver close/open submitted in order; two externals active with lid open; builtin restored.')
+assert any(r.get('routingRestore') and r.get('reason') in ('trial_expired', 'confirmation_expired') for r in records)
+print('PASS: driver close/open submitted in order; two externals enumerated with lid open; original builtin mode restored. Pixels not verified.')
 print(f'Additional external IDs activated: {sorted(external(active) - external(before))}')
