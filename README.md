@@ -58,6 +58,8 @@ build/OpenClam.app/Contents/MacOS/OpenClam self-test
 
 进一步的逆向发现与测试证据见 [研究记录](docs/RESEARCH.md)。
 
+M3 的直接合盖路径预检、实测阻碍及采样步骤见 [M3 实验说明](docs/M3实验说明.md)。该研究工具独立于菜单栏应用，尚未实现双外屏解锁。
+
 ## 许可证与第三方组件
 
 本项目使用 [MIT 许可证](LICENSE)。欢迎通过 Issues 提交机型、系统版本、连接方式与测试结果；分享诊断输出前请删除显示器序列号等设备标识。
