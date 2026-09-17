@@ -1,0 +1,65 @@
+# OpenClam · 研究原型
+
+开盖使用外接显示器时，关闭内建显示器；全部外屏断开后恢复内屏。
+
+当前版本使用桌面布局断开与面板电源请求，**不模拟铰链角度或系统合盖状态，也尚未实现基础款 M3 开盖双外屏解锁**。
+
+要求 Apple Silicon MacBook 和 macOS 15 或更新版本。
+
+**[下载研究预览版](https://github.com/try2love/OpenClam/releases)** · [安装与测试说明](docs/安装与测试.txt)
+
+## 使用
+
+下载 DMG，将 `OpenClam.app` 拖入“应用程序”后打开；自行构建可打开 `build/OpenClam.app`。在菜单栏找到 **OpenClam**：
+
+- **关闭内屏，保留外屏**：保持外屏工作，内屏退出桌面并请求关闭面板。
+- **恢复内建显示器**：结束当前会话并恢复内屏。
+- **测试关闭 10 秒后恢复**：先试用一个短会话。
+- **退出并恢复内屏**：结束会话后退出。
+
+只接受开盖、扩展显示模式且至少一台外屏正在显示的状态。启动应用不会自动关闭内屏。外屏重新接入后，也不会自行重新关闭内屏，需要再次点击。
+
+每个关闭会话有独立守护进程。检测到全部外屏不可用、主程序退出、主程序心跳超过 12 秒未更新或短测到期时，守护进程请求恢复内屏。外屏状态每 0.5 秒检查一次；显示系统本身的更新和恢复还需额外时间。真正合盖时延迟恢复到重新开盖，避免与系统正常合盖行为冲突。
+
+本地构建仅做 ad-hoc 签名，没有公证。无需安装驱动、root 权限、修改 SIP 或开机安全策略。
+
+## 当前验证范围
+
+测试设备：M4 MacBook Air，macOS 15.6.1，两台原生外屏。
+
+- 已实测：内屏退出桌面，两台外屏 ID 保持不变，定时恢复内屏。
+- 已实测：强制结束关闭会话的主程序后，独立守护恢复内屏；8 项恢复判断测试通过。
+- 面板关闭请求返回成功，但 IORegistry 的电源属性未提供足够的关电证据。背光是否实际熄灭需目视确认，不能据此宣称物理断电。
+- 实际拔线恢复需要用户拔掉所有外屏完成硬件验收；恢复判断有自动测试。
+- 不承诺改善温度或性能；尚无温度对照实验。
+- 私有接口可能随系统更新变化。守护进程提供尽力恢复，不能在其自身也被终止、系统挂起或接口失效时保证恢复。
+
+若恢复失败，先重新连接外屏或将盖子合上再打开。保留手工恢复入口：
+
+```sh
+build/OpenClam.app/Contents/MacOS/display-helper on --commit session
+```
+
+不要直接运行 helper 的 `off`：它绕过 OpenClam 的独立恢复守护。
+
+## 构建与研究入口
+
+```sh
+bash scripts/build.sh
+build/OpenClam.app/Contents/MacOS/OpenClam status
+build/OpenClam.app/Contents/MacOS/OpenClam observe 60
+build/OpenClam.app/Contents/MacOS/OpenClam trial 10
+build/OpenClam.app/Contents/MacOS/OpenClam self-test
+```
+
+`status` 读取真实铰链报告、系统合盖状态与在线显示器，不收集设备序列号。`observe` 每秒输出一份 JSON，可用于比较真实开合盖前后状态。运行这些入口需要访问本机桌面会话；受限代理沙箱中可能无法读到显示器。
+
+`probe-open` 仅在系统确认已开盖时发送同状态调试请求 `IOPMTestClamshellOpen`。它是权限探测，不是实现成功的判据；没有关闭事件、传感器写入、驱动安装或安全设置修改。
+
+进一步的逆向发现与测试证据见 [研究记录](docs/RESEARCH.md)。
+
+## 许可证与第三方组件
+
+本项目使用 [MIT 许可证](LICENSE)。欢迎通过 Issues 提交机型、系统版本、连接方式与测试结果；分享诊断输出前请删除显示器序列号等设备标识。
+
+显示助手来自 [TCXM/clamless](https://github.com/TCXM/clamless)，MIT，Copyright (c) 2026 Yuxiao Zhu；完整源代码与许可证位于 `Vendor/Clamless/`。OpenClam 添加菜单栏界面、独立心跳守护、受保护会话、传感器诊断和验收测试，不将该助手的能力作为新的合盖模拟成果。
