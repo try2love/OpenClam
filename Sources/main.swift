@@ -220,10 +220,12 @@ final class Session {
 
 final class App: NSObject, NSApplicationDelegate {
     let session = Session()
+    let routing = RoutingSession()
     var item: NSStatusItem!
     var status: NSMenuItem!
     var enable: NSMenuItem!
     var disable: NSMenuItem!
+    var routeEnable: NSMenuItem!
     var timer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -236,6 +238,8 @@ final class App: NSObject, NSApplicationDelegate {
         disable = menu.addItem(withTitle: "恢复内建显示器", action: #selector(turnOn), keyEquivalent: "")
         menu.addItem(withTitle: "测试关闭 10 秒后恢复", action: #selector(trial), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
+        routeEnable = menu.addItem(withTitle: "启用双外屏模式（实验）", action: #selector(route), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "退出并恢复内屏", action: #selector(quit), keyEquivalent: "q")
         for entry in menu.items { entry.target = self }
         menu.autoenablesItems = false
@@ -246,13 +250,17 @@ final class App: NSObject, NSApplicationDelegate {
     }
     func tick() {
         session.beat()
+        routing.beat()
         let count = externalCount()
-        let off = session.running
-        status.title = "外屏 \(count) 台 · \(off ? "内屏关闭会话中" : "未启用")"
-        enable.isEnabled = !off && count > 0
-        disable.isEnabled = off || builtinID().map { CGDisplayIsAsleep($0) != 0 } == true
+        let off = session.running || routing.running
+        let recoveryPending = routing.recoveryUnconfirmed
+        status.title = "外屏 \(count) 台 · \(recoveryPending ? "内屏恢复未确认" : (routing.running ? "双外屏模式" : (off ? "内屏关闭会话中" : "未启用")))"
+        enable.isEnabled = !off && !recoveryPending && count > 0
+        routeEnable.isEnabled = !off && !recoveryPending && count > 0
+        disable.isEnabled = off || recoveryPending || builtinID().map { CGDisplayIsAsleep($0) != 0 } == true
     }
     func begin(_ seconds: Double) {
+        guard !routing.running && !routing.recoveryUnconfirmed else { return }
         if !session.start(duration: seconds) {
             let alert = NSAlert(); alert.messageText = "暂时无法关闭内屏"
             alert.informativeText = session.lastError; alert.runModal()
@@ -261,16 +269,25 @@ final class App: NSObject, NSApplicationDelegate {
     }
     @objc func turnOff() { begin(0) }
     @objc func trial() { begin(10) }
+    @objc func route() {
+        guard !session.running else { return }
+        if !routing.start(duration: 0) {
+            let alert = NSAlert(); alert.messageText = "双外屏模式未启用"
+            alert.informativeText = routing.lastError; alert.runModal()
+        }
+        tick()
+    }
     @objc func turnOn() {
-        if !session.stop() {
+        let routed = routing.stop()
+        if !session.stop() || !routed {
             let alert = NSAlert(); alert.messageText = "内屏恢复尚未确认"
-            alert.informativeText = "请打开笔记本盖子；若仍未恢复，可重新连接外屏或合盖后重新打开。"
+            alert.informativeText = "请打开笔记本盖子后再次点击恢复内建显示器；若仍未恢复，可重新连接外屏或合盖后重新打开。"
             alert.runModal()
         }
         tick()
     }
     @objc func quit() { NSApplication.shared.terminate(nil) }
-    func applicationWillTerminate(_ notification: Notification) { _ = session.stop() }
+    func applicationWillTerminate(_ notification: Notification) { _ = routing.stop(); _ = session.stop() }
 }
 
 signal(SIGPIPE, SIG_IGN)
@@ -292,6 +309,30 @@ if args == ["self-test"] {
         guard actual == c.6 else { fputs("Recovery policy failed case \(index)\n", stderr); exit(1) }
     }
     emit(["recoveryPolicyCasesPassed": cases.count])
+    let routingCases: [(Bool, Bool, Bool, [UInt32], Bool)] = [
+        (true, true, true, [2], false), // M3 open baseline.
+        (true, true, false, [2], false), // Old OpenClam: internal off, still only one external.
+        (true, false, false, [2, 3], false), // Real lid closed is not the requested result.
+        (true, true, false, [2, 3], true),
+        (false, true, false, [2, 3], false),
+        (true, true, false, [2, 2], false),
+        (true, true, true, [2, 3], false)
+    ]
+    for c in routingCases {
+        guard routingAchieved(queryOK: c.0, physicallyOpen: c.1, builtinActive: c.2, activeExternalIDs: c.3) == c.4 else { exit(1) }
+    }
+    emit(["routingOutcomeCasesPassed": routingCases.count])
+} else if args.first == "--routing-guard", args.count == 2, let seconds = Double(args[1]), seconds >= 0, seconds.isFinite {
+    routingGuardian(duration: seconds)
+} else if args.first == "routing-trial", args.count == 2, let seconds = Double(args[1]), seconds >= 10, seconds <= 60 {
+    let routing = RoutingSession()
+    emit(["phase": "before", "snapshot": snapshot()])
+    guard routing.start(duration: seconds) else { fputs("\(routing.lastError)\n", stderr); exit(2) }
+    emit(["phase": "routing_active", "snapshot": snapshot()])
+    while routing.running { routing.beat(); Thread.sleep(forTimeInterval: 0.5) }
+    let ok = routing.stop()
+    emit(["phase": "restored", "verifiedLayoutAndWake": ok, "snapshot": snapshot()])
+    exit(ok ? 0 : 3)
 } else if args.first == "--guard", args.count == 3, let id = UInt32(args[1]), let seconds = Double(args[2]) {
     guardian(id, duration: seconds)
 } else if args == ["status"] {
@@ -324,6 +365,6 @@ if args == ["self-test"] {
     app.delegate = delegate
     app.run()
 } else {
-    fputs("Usage: OpenClam [status | observe SECONDS | trial 5..60 | probe-open]\n", stderr)
+    fputs("Usage: OpenClam [status | observe SECONDS | trial 5..60 | routing-trial 10..60 | probe-open | self-test]\n", stderr)
     exit(2)
 }
