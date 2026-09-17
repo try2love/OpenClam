@@ -1,4 +1,4 @@
-"""Kill our guardian while its off helper is alive; owner must reap the group before recovery."""
+"""Kill our guardian during layout-off; owner must reap the group before recovery."""
 import json
 import os
 import pathlib
@@ -27,7 +27,7 @@ with path.open('w') as log:
             for guardian, command in children(owner.pid):
                 if '--routing-guard ' in command:
                     for helper, helper_command in children(guardian):
-                        if helper_command.startswith(str(binary.parent / 'display-helper') + ' off '):
+                        if helper_command.startswith(str(binary.parent / 'display-helper') + ' layout-off '):
                             # Only this test's descendant, never the user's app.
                             assert os.getpgid(helper) == guardian, 'Mutator escaped guardian process group'
                             os.kill(guardian, signal.SIGKILL)
@@ -39,8 +39,8 @@ with path.open('w') as log:
                 break
             if owner.poll() is not None:
                 raise RuntimeError('Owner exited before intended crash')
-            time.sleep(0.1)
-        assert killed, 'No owned off helper observed'
+            time.sleep(0.01)
+        assert killed, 'No owned layout-off helper observed'
         owner.wait(timeout=40)
         sessions = sorted(set(diagnostics.glob('routing-session-*.jsonl')) - previous_sessions)
         content = path.read_text() + (sessions[-1].read_text() if sessions else '')
@@ -55,7 +55,7 @@ with path.open('w') as log:
             pass
         else:
             raise AssertionError('Original mutator still exists after recovery')
-        print('PASS: guardian SIGKILL during off helper; isolated descendants stopped; builtin mode restored.')
+        print('PASS: guardian SIGKILL during layout-off helper; isolated descendants stopped; builtin mode restored.')
     finally:
         if owner.poll() is None:
             owner.terminate()

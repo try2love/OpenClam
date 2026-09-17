@@ -170,8 +170,9 @@ func routingGuardian(duration: Double, savedState: String) -> Never {
     guard let record = jsonRecord(boundedRun(driverHelper, ["identify"])),
           let registryID = record["registryID"] as? NSNumber else { fail("未找到可控制的内建显示通道") }
     let target = registryID.stringValue
-    routingEvent(["event": "routing_baseline", "originalExternalIDs": originalExternals.sorted(), "pinnedRegistryID": registryID])
-    routingEvidence("before_soft_off")
+    routingEvent(["event": "routing_baseline", "originalExternalIDs": originalExternals.sorted(),
+                  "pinnedRegistryID": registryID, "preparation": "layout_only"])
+    routingEvidence("before_layout_off")
     var changed = false, selectedExternal = false
     func rollback(_ reason: String) -> Bool {
         guard changed else { return true }
@@ -185,12 +186,15 @@ func routingGuardian(duration: Double, savedState: String) -> Never {
     }
     if let reason = stopReason() { fail(reason) }
     changed = true
-    // Power requests re-read the physical lid. Submit closed only after soft-off.
-    let off = boundedRun(helper, ["off", "--commit", "session"]).0
-    if off != 0 || stopReason() != nil { abort("off_interrupted", "切换中止") }
-    routingEvidence("after_soft_off")
+    // Let WindowServer manage power while disabling the built-in layout. The
+    // normal off helper additionally requests power0 outside its bookkeeping;
+    // on M3 the shared endpoint subsequently enumerated with no picture. Avoid
+    // that extra vote in this experiment; layout-off can still power down via CA.
+    let off = boundedRun(helper, ["layout-off", "--commit", "session"]).0
+    if off != 0 || stopReason() != nil { abort("layout_off_interrupted", "切换中止") }
+    routingEvidence("after_layout_off")
     Thread.sleep(forTimeInterval: 1)
-    if off != 0 || stopReason() != nil { abort("off_interrupted", "切换中止") }
+    if let reason = stopReason() { abort(reason, "切换中止") }
     if boundedRun(driverHelper, ["close", target]).0 != 0 { abort("driver_rejected", "系统未接受合盖请求") }
     let deadline = ProcessInfo.processInfo.systemUptime + 6
     var stableSince: Double?

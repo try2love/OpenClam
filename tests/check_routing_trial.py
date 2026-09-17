@@ -3,6 +3,11 @@ import json
 import sys
 
 records = [json.loads(s) for path in sys.argv[1:] for s in open(path) if s.startswith('{')]
+assert any(r.get('event') == 'routing_baseline' and r.get('preparation') == 'layout_only' for r in records)
+preparation = [r.get('operation') for r in records
+               if r.get('event') == 'helper_start' and r.get('helper') == 'display-helper']
+assert preparation.count('layout-off') == 1, preparation
+assert not {'off', 'panel-off', 'panel-request'}.intersection(preparation), preparation
 phases = {r['phase']: r for r in records if 'phase' in r}
 before, active, restored = [phases[p]['snapshot'] for p in ('before', 'routing_preview', 'restored')]
 external = lambda s: {d['id'] for d in s['displays'] if not d['builtin'] and d['active']}
