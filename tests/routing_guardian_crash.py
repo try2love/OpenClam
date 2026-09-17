@@ -9,6 +9,9 @@ import time
 root = pathlib.Path(__file__).resolve().parents[1]
 binary = root / 'build/OpenClam.app/Contents/MacOS/OpenClam'
 path = root / '.tmp/routing-guardian-crash.log'
+diagnostics = root / '.tmp/routing-guardian-crash-diagnostics'
+environment = {**os.environ, 'OPENCLAM_DIAGNOSTICS_DIR': str(diagnostics)}
+previous_sessions = set(diagnostics.glob('routing-session-*.jsonl'))
 
 def children(pid):
     rows = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,command='], text=True).splitlines()
@@ -16,7 +19,7 @@ def children(pid):
             for p, parent, command in [parts] if int(parent) == pid]
 
 with path.open('w') as log:
-    owner = subprocess.Popen([str(binary), 'routing-trial', '45'], stdout=log, stderr=log)
+    owner = subprocess.Popen([str(binary), 'routing-trial', '45'], stdout=log, stderr=log, env=environment)
     try:
         deadline = time.monotonic() + 20
         killed = False
@@ -39,7 +42,9 @@ with path.open('w') as log:
             time.sleep(0.1)
         assert killed, 'No owned off helper observed'
         owner.wait(timeout=40)
-        records = [json.loads(line) for line in path.read_text().splitlines() if line.startswith('{')]
+        sessions = sorted(set(diagnostics.glob('routing-session-*.jsonl')) - previous_sessions)
+        content = path.read_text() + (sessions[-1].read_text() if sessions else '')
+        records = [json.loads(line) for line in content.splitlines() if line.startswith('{')]
         assert any(r.get('stage') == 'verified' and r.get('restored') for r in records)
         assert not any(r.get('requestedState') == 'closed' for r in records), 'Late close after guardian death'
         state = json.loads(subprocess.check_output([str(binary), 'status'], timeout=8))

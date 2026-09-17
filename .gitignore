@@ -3,3 +3,4 @@ build/
 dist/
 .DS_Store
 M3-report.*/
+OpenClam-M3-report*.json

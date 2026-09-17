@@ -10,6 +10,7 @@
 typedef CFTypeRef IOMobileFramebufferRef;
 typedef kern_return_t (*OpenFramebuffer)(io_service_t, task_port_t, uint32_t, IOMobileFramebufferRef *);
 typedef int32_t (*GetLinkQuality)(IOMobileFramebufferRef);
+typedef kern_return_t (*GetDigitalOutMode)(IOMobileFramebufferRef, uint32_t *, uint32_t *);
 typedef CFDictionaryRef (*CopyDisplayInfo)(CGDirectDisplayID);
 
 static id property(io_service_t service, NSString *key) {
@@ -51,6 +52,48 @@ static NSDictionary *modeInfo(CGDirectDisplayID display) {
     return info;
 }
 
+// Port events are historical. Keep only link-control fields, never sink identity.
+static NSArray *portEvidence(void) {
+    NSMutableArray *ports = [NSMutableArray array];
+    io_iterator_t iterator = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+        IOServiceMatching("AppleDCPDPTXRemotePortUFP"), &iterator) != KERN_SUCCESS) return ports;
+    io_service_t service;
+    while ((service = IOIteratorNext(iterator))) {
+        uint64_t registryID = 0; IORegistryEntryGetRegistryEntryID(service, &registryID);
+        io_name_t name = {0}; IORegistryEntryGetName(service, name);
+        NSMutableDictionary *port = [@{@"registryID":@(registryID), @"name":@(name),
+            @"eventsAreHistorical":@YES} mutableCopy];
+        id hints = property(service, @"DisplayHints");
+        NSMutableDictionary *selected = [NSMutableDictionary dictionary];
+        for (NSString *key in @[@"Valid", @"MaxW", @"MaxH", @"MaxBpc", @"MaxActivePixelRate", @"MaxTotalPixelRate"]) {
+            if ([hints isKindOfClass:NSDictionary.class] && [hints[key] isKindOfClass:NSNumber.class]) selected[key] = hints[key];
+        }
+        port[@"currentHints"] = selected;
+        id log = property(service, @"EventLog");
+        NSMutableArray *events = [NSMutableArray array];
+        if ([log isKindOfClass:NSArray.class]) for (id entry in log) {
+            if (![entry isKindOfClass:NSDictionary.class]) continue;
+            id payload = entry[@"EventPayload"];
+            if (![payload isKindOfClass:NSDictionary.class]) continue;
+            NSMutableDictionary *event = [NSMutableDictionary dictionary];
+            if ([@[@"Activate", @"SinkActive", @"LaneCount", @"LinkRate", @"Registered", @"HintsReserved", @"Downspread"] containsObject:payload[@"State"] ?: NSNull.null]) {
+                event[@"State"] = payload[@"State"];
+                if ([payload[@"Value"] isKindOfClass:NSNumber.class]) event[@"Value"] = payload[@"Value"];
+            }
+            if ([@[@"DisplayRequest", @"DisplayRelease", @"Plug", @"Unplug"] containsObject:payload[@"Action"] ?: NSNull.null]) event[@"Action"] = payload[@"Action"];
+            for (NSString *key in @[@"Valid", @"MaxW", @"MaxH"]) {
+                if ([payload[key] isKindOfClass:NSNumber.class]) event[key] = payload[key];
+            }
+            if (event.count) [events addObject:event];
+        }
+        port[@"recentEvents"] = events.count > 16 ? [events subarrayWithRange:NSMakeRange(events.count-16,16)] : events;
+        [ports addObject:port]; IOObjectRelease(service);
+    }
+    IOObjectRelease(iterator);
+    return ports;
+}
+
 int main(int argc, const char **argv) { @autoreleasepool {
     (void)argv;
     if (argc != 1) { fputs("Usage: display-link\n", stderr); return 2; }
@@ -60,6 +103,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     void *iomfb = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_NOW);
     OpenFramebuffer openFramebuffer = iomfb ? (OpenFramebuffer)dlsym(iomfb, "IOMobileFramebufferOpen") : NULL;
     GetLinkQuality getQuality = iomfb ? (GetLinkQuality)dlsym(iomfb, "IOMobileFramebufferGetLinkQuality") : NULL;
+    GetDigitalOutMode getMode = iomfb ? (GetDigitalOutMode)dlsym(iomfb, "IOMobileFramebufferGetDigitalOutMode") : NULL;
 
     CGDirectDisplayID ids[32]; uint32_t count = 0;
     CGError displayResult = CGGetOnlineDisplayList(32, ids, &count);
@@ -95,18 +139,37 @@ int main(int argc, const char **argv) { @autoreleasepool {
                 @"internalChannel":@([name isKindOfClass:NSString.class] && [name hasPrefix:@"disp0,"]),
                 @"matchedDisplayID":NSNull.null, @"linkQuality":NSNull.null
             } mutableCopy];
+            io_name_t serviceName = {0}; IORegistryEntryGetName(service, serviceName);
+            record[@"serviceName"] = @(serviceName);
+            for (NSString *key in @[@"DPTimingModeId", @"DisplayWidth", @"DisplayHeight", @"DisplayClock", @"PixelClock"]) {
+                id value = property(service, key);
+                if ([value isKindOfClass:NSNumber.class]) record[key] = value;
+            }
             if (idResult == KERN_SUCCESS && registryID != 0) {
                 NSNumber *key = @(registryID);
                 if (!framebuffersByRegistryID[key]) framebuffersByRegistryID[key] = [NSMutableArray array];
                 [framebuffersByRegistryID[key] addObject:record];
             }
-            if (openFramebuffer && getQuality) {
+            if (openFramebuffer) {
                 IOMobileFramebufferRef fb = NULL;
                 kern_return_t result = openFramebuffer(service, mach_task_self(), 0, &fb);
+                record[@"openResult"] = @(result);
                 if (result == KERN_SUCCESS && fb) {
-                    int32_t quality = getQuality(fb);
-                    // INT32_MIN is the framework's failed-query sentinel.
-                    if (quality != INT32_MIN) record[@"linkQuality"] = @(quality);
+                    if (getQuality) {
+                        int32_t quality = getQuality(fb);
+                        // INT32_MIN is the framework's failed-query sentinel.
+                        if (quality != INT32_MIN) record[@"linkQuality"] = @(quality);
+                    }
+                    if (getMode) {
+                        // This is the read-only mode query, NOT GetDigitalOutState.
+                        // Driver mode indices are not CoreGraphics display-mode IDs.
+                        uint32_t mode = 0, encoding = 0;
+                        kern_return_t modeResult = getMode(fb, &mode, &encoding);
+                        record[@"digitalModeResult"] = @(modeResult);
+                        if (modeResult == KERN_SUCCESS) {
+                            record[@"digitalMode"] = @(mode); record[@"digitalEncoding"] = @(encoding);
+                        }
+                    }
                 }
                 if (fb) CFRelease(fb);
             }
@@ -123,8 +186,12 @@ int main(int argc, const char **argv) { @autoreleasepool {
         NSArray *records = framebuffersByRegistryID[key], *matches = displayIDsByRegistryID[key];
         if (records.count == 1 && matches.count == 1) records[0][@"matchedDisplayID"] = matches[0];
     }
+    io_service_t root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"));
+    id lid = root ? property(root, @"AppleClamshellState") : nil;
+    if (root) IOObjectRelease(root);
     NSDictionary *output = @{@"displayQueryReturn":@(displayResult), @"framebufferQueryReturn":@(framebufferResult),
-        @"displays":displays, @"framebuffers":framebuffers};
+        @"physicalLidClosed":lid ?: NSNull.null, @"displays":displays, @"framebuffers":framebuffers,
+        @"ports":portEvidence()};
     NSData *json = [NSJSONSerialization dataWithJSONObject:output options:NSJSONWritingSortedKeys error:nil];
     if (!json) return 3;
     puts([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String);

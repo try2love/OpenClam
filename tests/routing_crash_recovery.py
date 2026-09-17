@@ -1,5 +1,6 @@
 """Kill only our own owner during apply or after activation; observe real recovery."""
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -10,17 +11,24 @@ assert phase in ('applying', 'active')
 root = pathlib.Path(__file__).resolve().parents[1]
 binary = root / 'build/OpenClam.app/Contents/MacOS/OpenClam'
 path = root / f'.tmp/routing-crash-{phase}.log'
+diagnostics = root / f'.tmp/routing-crash-{phase}-diagnostics'
+environment = {**os.environ, 'OPENCLAM_DIAGNOSTICS_DIR': str(diagnostics)}
+previous_sessions = set(diagnostics.glob('routing-session-*.jsonl'))
+
+def content():
+    sessions = sorted(set(diagnostics.glob('routing-session-*.jsonl')) - previous_sessions)
+    return path.read_text() + (sessions[-1].read_text() if sessions else '')
 
 def records():
-    return [json.loads(line) for line in path.read_text().splitlines() if line.startswith('{')]
+    return [json.loads(line) for line in content().splitlines(keepends=True)
+            if line.startswith('{') and line.endswith('\n')]
 
 with path.open('w') as log:
-    owner = subprocess.Popen([str(binary), 'routing-trial', '45'], stdout=log, stderr=log)
+    owner = subprocess.Popen([str(binary), 'routing-trial', '45'], stdout=log, stderr=log, env=environment)
     try:
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            content = path.read_text()
-            ready = ('layout: built-in display disconnected' in content if phase == 'applying'
+            ready = ('layout: built-in display disconnected' in content() if phase == 'applying'
                      else any(r.get('routingGuardianPreview') for r in records()))
             if ready:
                 break

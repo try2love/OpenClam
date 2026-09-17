@@ -5,6 +5,8 @@ import Darwin
 private let driverHelper = executable.deletingLastPathComponent().appendingPathComponent("clamshell-driver")
 private let linkHelper = executable.deletingLastPathComponent().appendingPathComponent("display-link")
 private var routingInterrupted: sig_atomic_t = 0
+private var routingLogHandle: FileHandle?
+private var routingOutput: FileHandle { routingLogHandle ?? FileHandle.standardError }
 
 // Enumeration is only a prerequisite for a preview, never proof of scanout.
 func routingTopologyReady(queryOK: Bool, physicallyOpen: Bool, builtinActive: Bool,
@@ -33,17 +35,30 @@ private func builtinRestored() -> Bool {
     }
 }
 
+private func routingEvent(_ event: [String: Any]) {
+    var record = event
+    record["timestamp"] = ISO8601DateFormatter().string(from: Date())
+    if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) {
+        routingOutput.write(data + Data([10]))
+    }
+}
+
 // Own/reap every mutator before rollback: a late close must never race an open.
 private func boundedRun(_ url: URL, _ arguments: [String], timeout: Double = 5) -> (Int32, String) {
     let child = Process(), output = Pipe()
+    let operation = arguments.first ?? "snapshot"
+    routingEvent(["event": "helper_start", "helper": url.lastPathComponent, "operation": operation])
     // Foundation Process creates a fresh process group. Join explicitly in a
     // small launcher before exec, so an orphaned mutator remains killable with
     // its guardian group. The alarm survives exec even if the guardian dies.
     child.executableURL = executable
     child.arguments = ["--routing-child", String(getpgrp()), String(Int(ceil(timeout)) + 1), url.path] + arguments
     child.standardInput = FileHandle.nullDevice
-    child.standardOutput = output; child.standardError = FileHandle.standardError
-    do { try child.run() } catch { return (127, error.localizedDescription) }
+    child.standardOutput = output; child.standardError = routingOutput
+    do { try child.run() } catch {
+        routingEvent(["event": "helper_end", "helper": url.lastPathComponent, "operation": operation, "exitStatus": 127])
+        return (127, error.localizedDescription)
+    }
     let deadline = ProcessInfo.processInfo.systemUptime + timeout
     while child.isRunning && ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.05) }
     let expired = child.isRunning
@@ -54,7 +69,9 @@ private func boundedRun(_ url: URL, _ arguments: [String], timeout: Double = 5) 
     }
     child.waitUntilExit()
     let data = output.fileHandleForReading.readDataToEndOfFile()
-    if !data.isEmpty { FileHandle.standardError.write(data) }
+    if !data.isEmpty { routingOutput.write(data) }
+    routingEvent(["event": "helper_end", "helper": url.lastPathComponent, "operation": operation,
+                  "exitStatus": expired ? 124 : child.terminationStatus, "timedOut": expired])
     return (expired ? 124 : child.terminationStatus, String(data: data, encoding: .utf8) ?? "")
 }
 
@@ -63,7 +80,20 @@ private func jsonRecord(_ result: (Int32, String)) -> [String: Any]? {
     return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
 }
 
+// Bounded, read-only snapshots. Never query the HID sensor in a guardian.
+private func routingEvidence(_ phase: String) {
+    routingEvent(["event": "phase", "phase": phase])
+    _ = boundedRun(linkHelper, [])
+}
+
+func routingDiagnosticReport() -> Data? {
+    routingEvent(["event": "report_current_snapshot"])
+    let result = boundedRun(linkHelper, [])
+    return RoutingDiagnostics.latestReport(currentLinkData: result.0 == 0 ? result.1.data(using: .utf8) : nil)
+}
+
 private func recoverRouting(target: String, savedState: String, selectedExternal: Bool) -> Bool {
+    routingEvent(["event": "restore_started", "selectedExternal": selectedExternal])
     if selectedExternal { _ = boundedRun(driverHelper, ["quiesce", target]) }
     let opened = boundedRun(driverHelper, ["open", target]).0 == 0
     // Release the override immediately; restore the panel only after a real reopening.
@@ -78,6 +108,7 @@ private func recoverRouting(target: String, savedState: String, selectedExternal
         let result = boundedRun(executable, ["--routing-recover", savedState], timeout: 14)
         if result.0 == 0 && builtinRestored() { restored = true; break }
     }
+    routingEvent(["event": "restore_finished", "opened": opened, "modeRestored": restored])
     return opened && restored
 }
 
@@ -139,6 +170,8 @@ func routingGuardian(duration: Double, savedState: String) -> Never {
     guard let record = jsonRecord(boundedRun(driverHelper, ["identify"])),
           let registryID = record["registryID"] as? NSNumber else { fail("未找到可控制的内建显示通道") }
     let target = registryID.stringValue
+    routingEvent(["event": "routing_baseline", "originalExternalIDs": originalExternals.sorted(), "pinnedRegistryID": registryID])
+    routingEvidence("before_soft_off")
     var changed = false, selectedExternal = false
     func rollback(_ reason: String) -> Bool {
         guard changed else { return true }
@@ -154,6 +187,8 @@ func routingGuardian(duration: Double, savedState: String) -> Never {
     changed = true
     // Power requests re-read the physical lid. Submit closed only after soft-off.
     let off = boundedRun(helper, ["off", "--commit", "session"]).0
+    if off != 0 || stopReason() != nil { abort("off_interrupted", "切换中止") }
+    routingEvidence("after_soft_off")
     Thread.sleep(forTimeInterval: 1)
     if off != 0 || stopReason() != nil { abort("off_interrupted", "切换中止") }
     if boundedRun(driverHelper, ["close", target]).0 != 0 { abort("driver_rejected", "系统未接受合盖请求") }
@@ -168,25 +203,35 @@ func routingGuardian(duration: Double, savedState: String) -> Never {
         } else { stableSince = nil }
         Thread.sleep(forTimeInterval: 0.2)
     }
-    guard topologyReady else { abort("dual_external_not_observed", "未能识别两台活动外屏") }
+    guard topologyReady else {
+        routingEvidence("topology_not_ready")
+        abort("dual_external_not_observed", "未能识别两台活动外屏")
+    }
     let newIDs = Set(displays().1.filter { CGDisplayIsBuiltin($0) == 0 && CGDisplayIsActive($0) != 0 }).subtracting(originalExternals)
+    routingEvent(["event": "routing_selection_decision", "originalExternalIDs": originalExternals.sorted(),
+                  "currentExternalIDs": displays().1.filter { CGDisplayIsBuiltin($0) == 0 && CGDisplayIsActive($0) != 0 }.sorted(),
+                  "newExternalIDs": newIDs.sorted(), "selectionRequired": !newIDs.isEmpty])
+    routingEvent(["event": "phase", "phase": "after_clamshell_close"])
+    let afterClose = boundedRun(linkHelper, [])
     // Select only the newly appeared external on the shared internal channel.
     // A successful A476 lid request did not by itself start M3 scanout in v0.2.
     if !newIDs.isEmpty {
-        guard let links = jsonRecord(boundedRun(linkHelper, [])),
+        guard let links = jsonRecord(afterClose),
               let channels = links["framebuffers"] as? [[String: Any]],
               let pinned = channels.first(where: { ($0["registryID"] as? NSNumber)?.stringValue == target }),
               let id = (pinned["matchedDisplayID"] as? NSNumber)?.uint32Value, newIDs.contains(id) else {
             abort("new_external_binding_unknown", "无法确认第二外屏的输出通道")
         }
         if let reason = stopReason() { abort(reason, "切换中止") }
+        routingEvent(["event": "external_selection_target", "displayID": id, "pinnedRegistryID": registryID])
         selectedExternal = true // Even a rejected/timed-out request requires symmetric recovery.
         if boundedRun(driverHelper, ["select-external", target, String(id)]).0 != 0 {
+            routingEvidence("external_selection_rejected")
             abort("external_selection_rejected", "系统未接受外屏输出选择")
         }
         Thread.sleep(forTimeInterval: 1)
     }
-    _ = boundedRun(linkHelper, []) // Passive evidence only; quality is not proof of pixels.
+    routingEvidence(selectedExternal ? "after_output_selection" : "output_selection_skipped")
     if let reason = stopReason() { abort(reason, "切换中止") }
     guard routingReady() else { abort("topology_lost", "外屏状态未保持稳定") }
     readyAt = ProcessInfo.processInfo.systemUptime
@@ -205,6 +250,11 @@ final class RoutingSession {
     private var input: Pipe?
     private var recoveryTarget: (registryID: String, savedState: String)?
     private var orphanGroup: pid_t?
+    private var diagnostics: RoutingDiagnostics?
+
+    func recordFeedback(_ value: String) {
+        diagnostics?.append(event: ["event": "visual_feedback", "result": value])
+    }
     private(set) var recoveryUnconfirmed = false
     private(set) var visualConfirmed = false
     var lastError = ""
@@ -217,6 +267,8 @@ final class RoutingSession {
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             orphanGroup = process.processIdentifier
         }
+        diagnostics?.append(event: ["event": "guardian_exit", "status": process.terminationStatus,
+                                    "normalExit": process.terminationReason == .exit])
         child = nil; visualConfirmed = false
         recoveryUnconfirmed = process.terminationReason != .exit || process.terminationStatus != 0
         if !recoveryUnconfirmed { recoveryTarget = nil }
@@ -226,10 +278,17 @@ final class RoutingSession {
         refreshCompletion()
         guard !running else { lastError = "已有双外屏会话正在运行"; return false }
         guard !recoveryUnconfirmed else { lastError = "内屏恢复尚未确认，请先点击恢复内建显示器"; return false }
+        do {
+            diagnostics = try RoutingDiagnostics.begin()
+            routingLogHandle = diagnostics?.stderrHandle
+        }
+        catch { lastError = "无法保存本次实验记录，请检查可用磁盘空间"; return false }
+        diagnostics?.append(event: ["event": "session_start", "duration": duration, "physicalLidClosed": lidClosed() as Any? ?? NSNull(), "activeExternalCount": externalCount()])
         guard lidClosed() == false, externalCount() > 0, let originalID = builtinID(),
               CGDisplayIsActive(originalID) != 0, !hasMirroring(),
               let state = captureBuiltinDisplayState(), let data = try? JSONEncoder().encode(state) else {
-            lastError = "需要开盖、可用的内屏和至少一台处于扩展模式的外屏"; return false
+            lastError = "需要开盖、可用的内屏和至少一台处于扩展模式的外屏"
+            diagnostics?.append(event: ["event": "start_refused", "reason": "preconditions"]); return false
         }
         guard let record = jsonRecord(boundedRun(driverHelper, ["identify"])),
               let registryID = record["registryID"] as? NSNumber else {
@@ -241,6 +300,7 @@ final class RoutingSession {
         process.executableURL = executable
         process.arguments = ["--routing-guard", String(duration), savedState]
         process.standardInput = heartbeat; process.standardOutput = output
+        process.standardError = diagnostics?.stderrHandle
         do { try process.run() } catch {
             recoveryTarget = nil; lastError = error.localizedDescription; return false
         }
@@ -259,14 +319,19 @@ final class RoutingSession {
         let message = String(data: response, encoding: .utf8) ?? ""
         guard message.hasPrefix("PREVIEW\n") else {
             lastError = message.hasPrefix("FAILED:") ? String(message.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines) : "切换未完成，已请求恢复内屏"
+            diagnostics?.append(event: ["event": "preview_failed", "message": lastError])
             _ = stop(); return false
         }
+        diagnostics?.append(event: ["event": "preview_started"])
         return true
     }
     func confirmVisibleOutputs() -> Bool {
         beat()
         guard running, routingReady(), let pipe = input else { return false }
-        do { try pipe.fileHandleForWriting.write(contentsOf: Data([2])); visualConfirmed = true; return true }
+        do {
+            try pipe.fileHandleForWriting.write(contentsOf: Data([2])); visualConfirmed = true
+            recordFeedback("both_outputs_visible"); return true
+        }
         catch { return false }
     }
     func beat() {
@@ -294,6 +359,7 @@ final class RoutingSession {
             orphanGroup = nil
         }
         let restored = recoverRouting(target: target.registryID, savedState: target.savedState, selectedExternal: true)
+        diagnostics?.append(event: ["event": "owner_recovery_finished", "restored": restored])
         recoveryUnconfirmed = !restored
         if restored { recoveryTarget = nil }
         return restored

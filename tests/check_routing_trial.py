@@ -2,7 +2,7 @@
 import json
 import sys
 
-records = [json.loads(s) for s in open(sys.argv[1]) if s.startswith('{')]
+records = [json.loads(s) for path in sys.argv[1:] for s in open(path) if s.startswith('{')]
 phases = {r['phase']: r for r in records if 'phase' in r}
 before, active, restored = [phases[p]['snapshot'] for p in ('before', 'routing_preview', 'restored')]
 external = lambda s: {d['id'] for d in s['displays'] if not d['builtin'] and d['active']}

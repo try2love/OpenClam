@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import CoreGraphics
 import IOKit
 import IOKit.hid
@@ -226,12 +227,16 @@ final class App: NSObject, NSApplicationDelegate {
     var enable: NSMenuItem!
     var disable: NSMenuItem!
     var routeEnable: NSMenuItem!
+    var exportItem: NSMenuItem!
     var timer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "OpenClam"
         let menu = NSMenu()
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
+        let versionItem = menu.addItem(withTitle: "OpenClam \(version)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
         status = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         enable = menu.addItem(withTitle: "关闭内屏，保留外屏", action: #selector(turnOff), keyEquivalent: "")
@@ -240,6 +245,7 @@ final class App: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
         routeEnable = menu.addItem(withTitle: "启用双外屏模式（实验）", action: #selector(route), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
+        exportItem = menu.addItem(withTitle: "导出实验报告…", action: #selector(exportReport), keyEquivalent: "")
         menu.addItem(withTitle: "退出并恢复内屏", action: #selector(quit), keyEquivalent: "q")
         for entry in menu.items { entry.target = self }
         menu.autoenablesItems = false
@@ -255,6 +261,7 @@ final class App: NSObject, NSApplicationDelegate {
         let off = session.running || routing.running
         let recoveryPending = routing.recoveryUnconfirmed
         status.title = "外屏 \(count) 台 · \(recoveryPending ? "内屏恢复未确认" : (routing.running ? (routing.visualConfirmed ? "双外屏模式" : "等待画面确认") : (off ? "内屏关闭会话中" : "未启用")))"
+        exportItem.isEnabled = !off
         enable.isEnabled = !off && !recoveryPending && count > 0
         routeEnable.isEnabled = !off && !recoveryPending && count > 0
         disable.isEnabled = off || recoveryPending || builtinID().map { CGDisplayIsAsleep($0) != 0 } == true
@@ -280,6 +287,7 @@ final class App: NSObject, NSApplicationDelegate {
         alert.informativeText = "请检查两台外屏是否都亮起且色彩正常。30 秒内未确认，将自动恢复内屏。"
         alert.addButton(withTitle: "恢复内屏")
         alert.addButton(withTitle: "两台都有画面，保留")
+        alert.addButton(withTitle: "无信号，恢复并导出报告")
         let previewTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.routing.beat()
@@ -288,7 +296,13 @@ final class App: NSObject, NSApplicationDelegate {
         RunLoop.main.add(previewTimer, forMode: .modalPanel)
         let choice = alert.runModal()
         previewTimer.invalidate(); alert.window.orderOut(nil)
-        if choice != .alertSecondButtonReturn || !routing.confirmVisibleOutputs() { turnOn() }
+        if choice == .alertThirdButtonReturn {
+            routing.recordFeedback("no_signal_or_bad_picture")
+            turnOn(); exportReport()
+        } else if choice != .alertSecondButtonReturn || !routing.confirmVisibleOutputs() {
+            routing.recordFeedback(choice == .alertFirstButtonReturn ? "restore_requested" : "no_confirmation")
+            turnOn()
+        }
         tick()
     }
     @objc func turnOn() {
@@ -299,6 +313,24 @@ final class App: NSObject, NSApplicationDelegate {
             alert.runModal()
         }
         tick()
+    }
+    @objc func exportReport() {
+        guard !routing.running && !session.running else { return }
+        guard let data = routingDiagnosticReport() else {
+            let alert = NSAlert(); alert.messageText = "还没有实验记录"
+            alert.informativeText = "运行一次双外屏实验后，即可导出报告。"; alert.runModal(); return
+        }
+        let panel = NSSavePanel()
+        panel.title = "导出实验报告"
+        panel.message = "保存实验记录与当前显示状态，不含屏幕内容，不会自动上传。"
+        panel.nameFieldStringValue = "OpenClam-M3-report.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try data.write(to: url, options: .atomic) }
+        catch {
+            let alert = NSAlert(); alert.messageText = "报告保存失败"
+            alert.informativeText = error.localizedDescription; alert.runModal()
+        }
     }
     @objc func quit() { NSApplication.shared.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) { _ = routing.stop(); _ = session.stop() }
@@ -368,6 +400,9 @@ if args == ["self-test"] {
     exit(ok ? 0 : 3)
 } else if args.first == "--guard", args.count == 3, let id = UInt32(args[1]), let seconds = Double(args[2]) {
     guardian(id, duration: seconds)
+} else if args == ["diagnostics"] {
+    guard let report = routingDiagnosticReport() else { fputs("No routing session recorded yet\n", stderr); exit(2) }
+    FileHandle.standardOutput.write(report); print("")
 } else if args == ["status"] {
     emit(snapshot())
 } else if args == ["probe-open"] {
@@ -398,6 +433,6 @@ if args == ["self-test"] {
     app.delegate = delegate
     app.run()
 } else {
-    fputs("Usage: OpenClam [status | observe SECONDS | trial 5..60 | routing-trial 0|10..60 | probe-open | self-test]\n", stderr)
+    fputs("Usage: OpenClam [status | diagnostics | observe SECONDS | trial 5..60 | routing-trial 0|10..60 | probe-open | self-test]\n", stderr)
     exit(2)
 }

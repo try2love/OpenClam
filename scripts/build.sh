@@ -6,7 +6,7 @@ xcrun clang -O2 -Wall -Wextra Vendor/Clamless/clamless-display.c \
   -framework CoreFoundation -framework CoreGraphics -framework IOKit \
   -o build/OpenClam.app/Contents/MacOS/display-helper
 xcrun swiftc -swift-version 5 -O -module-cache-path .tmp/module-cache \
-  Sources/main.swift Sources/Routing.swift Sources/DisplayRecovery.swift -framework AppKit -framework IOKit \
+  Sources/main.swift Sources/Routing.swift Sources/DisplayRecovery.swift Sources/RoutingDiagnostics.swift -framework AppKit -framework IOKit \
   -o build/OpenClam.app/Contents/MacOS/OpenClam
 xcrun clang -arch arm64 -mmacosx-version-min=15.0 -fobjc-arc -O2 -Wall -Wextra \
   Sources/clamshell-driver.m -framework Foundation -framework CoreGraphics -framework IOKit \
