@@ -4,6 +4,7 @@ import Darwin
 
 private let driverHelper = executable.deletingLastPathComponent().appendingPathComponent("clamshell-driver")
 private let linkHelper = executable.deletingLastPathComponent().appendingPathComponent("display-link")
+private let rebindHelper = executable.deletingLastPathComponent().appendingPathComponent("display-rebind")
 private var routingInterrupted: sig_atomic_t = 0
 private var routingLogHandle: FileHandle?
 private var routingOutput: FileHandle { routingLogHandle ?? FileHandle.standardError }
@@ -46,7 +47,7 @@ private func routingEvent(_ event: [String: Any]) {
 // Own/reap every mutator before rollback: a late close must never race an open.
 private func boundedRun(_ url: URL, _ arguments: [String], timeout: Double = 5) -> (Int32, String) {
     let child = Process(), output = Pipe()
-    let operation = arguments.first ?? "snapshot"
+    let operation = url == rebindHelper ? "rebind-external" : (arguments.first ?? "snapshot")
     routingEvent(["event": "helper_start", "helper": url.lastPathComponent, "operation": operation])
     // Foundation Process creates a fresh process group. Join explicitly in a
     // small launcher before exec, so an orphaned mutator remains killable with
@@ -113,7 +114,7 @@ private func recoverRouting(target: String, savedState: String, selectedExternal
 }
 
 func routingChild(group: pid_t, timeout: UInt32, command: [String]) -> Never {
-    let siblings = ["display-helper", "clamshell-driver", "display-link"].map {
+    let siblings = ["display-helper", "clamshell-driver", "display-link", "display-rebind"].map {
         executable.deletingLastPathComponent().appendingPathComponent($0).path
     }
     let ownRecovery = command.first == executable.path && command.count == 3 &&
@@ -234,8 +235,17 @@ func routingGuardian(duration: Double, savedState: String) -> Never {
             abort("external_selection_rejected", "系统未接受外屏输出选择")
         }
         Thread.sleep(forTimeInterval: 1)
+        routingEvidence("before_external_rebind")
+        if let reason = stopReason() { abort(reason, "切换中止") }
+        // Driver selection alone left the M3 external enumerated but dark.
+        // Request one real WindowServer activation cycle on that endpoint;
+        // its independent helper revalidates UUID, framebuffer and saved mode.
+        if boundedRun(rebindHelper, [target, String(id)], timeout: 12).0 != 0 {
+            routingEvidence("external_rebind_failed")
+            abort("external_rebind_failed", "系统未能重新启用第二外屏")
+        }
     }
-    routingEvidence(selectedExternal ? "after_output_selection" : "output_selection_skipped")
+    routingEvidence(selectedExternal ? "after_external_rebind" : "output_selection_skipped")
     if let reason = stopReason() { abort(reason, "切换中止") }
     guard routingReady() else { abort("topology_lost", "外屏状态未保持稳定") }
     readyAt = ProcessInfo.processInfo.systemUptime

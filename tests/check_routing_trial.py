@@ -21,6 +21,8 @@ assert phases['restored']['verifiedLayoutAndWake']
 assert phases['routing_preview']['visualConfirmed'] is False
 assert any(r.get('restored') and r.get('stage') == 'verified' for r in records)
 assert any(r.get('stage') == 'prepared' and r.get('restored') for r in records)
+assert not any(str(r.get('recoveryStep', '')).startswith('disable_') for r in records), 'Recovery disabled the built-in again'
+assert not any(r.get('cycled') for r in records), 'Unexpected built-in recovery cycle'
 requests = [r for r in records if 'requestedState' in r]
 assert [r['requestedState'] for r in requests] == ['closed', 'open']
 assert requests[0]['registryID'] == requests[1]['registryID']

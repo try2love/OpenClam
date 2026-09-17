@@ -165,38 +165,30 @@ private func recoveryOperation(_ step: String, _ code: Int32,
     return RecoveryConfigurationResult(code: code, step: step)
 }
 
-private func recoveryCommit(_ sky: RecoverySkyLight, display: CGDirectDisplayID,
-                            saved: BuiltinDisplayState, enabled: Bool) -> RecoveryConfigurationResult {
-    let prefix = enabled ? "enable" : "disable"
+private func recoveryEnable(_ sky: RecoverySkyLight, display: CGDirectDisplayID,
+                            saved: BuiltinDisplayState) -> RecoveryConfigurationResult {
     // Recheck immediately before staging: a former built-in ID must never
     // authorize a change to an external that now occupies that ID.
     guard saved.matches(display) else {
-        return recoveryOperation("\(prefix)_identity", CGError.invalidOperation.rawValue, display: display)
-    }
-    if !enabled && recoveryTopology(sky)?.contains(where: { !$0.builtin && $0.active && !$0.asleep }) != true {
-        return recoveryOperation("disable_external_guard", CGError.invalidOperation.rawValue, display: display)
+        return recoveryOperation("enable_identity", CGError.invalidOperation.rawValue, display: display)
     }
     var configuration: CGDisplayConfigRef?
     let begin = CGBeginDisplayConfiguration(&configuration)
     guard begin == .success, let configuration else {
-        return recoveryOperation("\(prefix)_begin", (begin == .success ? CGError.failure : begin).rawValue, display: display)
+        return recoveryOperation("enable_begin", (begin == .success ? CGError.failure : begin).rawValue, display: display)
     }
-    _ = recoveryOperation("\(prefix)_begin", begin.rawValue, display: display)
-    let enabledResult = sky.configureEnabled(configuration, display, enabled)
-    let staged = recoveryOperation("\(prefix)_sls", enabledResult, display: display)
+    _ = recoveryOperation("enable_begin", begin.rawValue, display: display)
+    let enabledResult = sky.configureEnabled(configuration, display, true)
+    let staged = recoveryOperation("enable_sls", enabledResult, display: display)
     guard enabledResult == CGError.success.rawValue else {
         CGCancelDisplayConfiguration(configuration)
         return staged
     }
     guard saved.matches(display) else {
         CGCancelDisplayConfiguration(configuration)
-        return recoveryOperation("\(prefix)_identity", CGError.invalidOperation.rawValue, display: display)
+        return recoveryOperation("enable_identity", CGError.invalidOperation.rawValue, display: display)
     }
-    if !enabled && recoveryTopology(sky)?.contains(where: { !$0.builtin && $0.active && !$0.asleep }) != true {
-        CGCancelDisplayConfiguration(configuration)
-        return recoveryOperation("disable_external_guard", CGError.invalidOperation.rawValue, display: display)
-    }
-    return recoveryOperation("\(prefix)_commit", CGCompleteDisplayConfiguration(configuration, .forSession).rawValue, display: display)
+    return recoveryOperation("enable_commit", CGCompleteDisplayConfiguration(configuration, .forSession).rawValue, display: display)
 }
 
 private func recoveryModeCommit(display: CGDirectDisplayID, saved: BuiltinDisplayState,
@@ -239,11 +231,10 @@ func prepareBuiltinDisplayRecovery(_ saved: BuiltinDisplayState) -> DisplayRecov
 // in its separately bounded/reaped recovery child. Polling is bounded here;
 // synchronous WindowServer calls still require the caller's process deadline.
 func restoreBuiltinDisplayState(_ saved: BuiltinDisplayState) -> DisplayRecoveryResult {
-    var cycled = false
     var currentID: CGDirectDisplayID?
     func result(_ restored: Bool, _ stage: String, _ detail: String) -> DisplayRecoveryResult {
         DisplayRecoveryResult(restored: restored, stage: stage, detail: detail,
-                              displayID: currentID, cycled: cycled)
+                              displayID: currentID, cycled: false)
     }
     guard let sky = RecoverySkyLight() else { return result(false, "load", "SkyLight configuration API unavailable") }
     let deadline = ProcessInfo.processInfo.systemUptime + 9.5
@@ -258,7 +249,7 @@ func restoreBuiltinDisplayState(_ saved: BuiltinDisplayState) -> DisplayRecovery
     // built-in using macOS's existing mode, then query the complete mode list.
     if CGDisplayIsActive(id) == 0 || CGDisplayIsAsleep(id) != 0 ||
        recoveryMode(saved.mode, display: id) == nil {
-        let enabled = recoveryCommit(sky, display: id, saved: saved, enabled: true)
+        let enabled = recoveryEnable(sky, display: id, saved: saved)
         guard enabled.succeeded else {
             return result(false, "initial_enable", enabled.detail)
         }
@@ -269,38 +260,13 @@ func restoreBuiltinDisplayState(_ saved: BuiltinDisplayState) -> DisplayRecovery
     }
     currentID = readyID
     guard recoveryMode(saved.mode, display: readyID) != nil else {
-        return result(false, "mode", "Built-in enable was submitted; captured mode is still unavailable, so no further disable was attempted")
+        return result(false, "mode", "Captured built-in mode is still unavailable; no disable was attempted")
     }
 
-    // Never blank the only usable screen or start another off transition when
-    // insufficient time remains to restore and verify it.
-    if CGDisplayIsActive(readyID) != 0,
-       deadline - ProcessInfo.processInfo.systemUptime > 2.5,
-       recoveryTopology(sky)?.contains(where: { !$0.builtin && $0.active && !$0.asleep }) == true {
-        let disabled = recoveryCommit(sky, display: readyID, saved: saved, enabled: false)
-        guard disabled.succeeded else {
-            if let freshID = sky.builtin(matching: saved) {
-                _ = recoveryCommit(sky, display: freshID, saved: saved, enabled: true)
-            }
-            return result(false, "disable", disabled.detail)
-        }
-        cycled = true
-        // Always proceed to re-enable, including after a settle timeout or an
-        // external unplug; an incomplete off transition still needs recovery.
-        _ = recoverySettle(sky, until: min(deadline, ProcessInfo.processInfo.systemUptime + 2))
-    }
-
-    guard let restoredID = sky.builtin(matching: saved) else {
-        return result(false, "rediscover", "Built-in identity unavailable after layout transition; refusing a cached display ID")
-    }
-    currentID = restoredID
-    // Mode configuration rejects some disabled display IDs even when an SLS
-    // enable is pending in the same transaction. Commit visibility first; a
-    // later optional mode failure must never cancel this enable transaction.
-    let enabled = recoveryCommit(sky, display: restoredID, saved: saved, enabled: true)
-    guard enabled.succeeded else {
-        return result(false, "enable", enabled.detail)
-    }
+    // Preserve a successful enable. The M3 report showed the optional second
+    // off/on cycle blanking this endpoint, then failing to re-enable with 1001
+    // on every recovery attempt. Recovery must never disable it again. Mode
+    // restoration is a separate transaction and only runs after it is awake.
     var modeAttempted = false
     var verifiedSince: Double?
     while ProcessInfo.processInfo.systemUptime < deadline {
@@ -308,8 +274,8 @@ func restoreBuiltinDisplayState(_ saved: BuiltinDisplayState) -> DisplayRecovery
            CGDisplayIsAsleep(freshID) == 0, let currentMode = CGDisplayCopyDisplayMode(freshID) {
             currentID = freshID
             if saved.mode.matches(currentMode) {
-                // The real off/on transition already refreshed CA. If macOS
-                // restored the saved mode itself, do not stage a no-op mode.
+                // If macOS restored the saved mode itself, keep that visible
+                // state instead of staging a redundant enable or mode change.
                 let now = ProcessInfo.processInfo.systemUptime
                 if verifiedSince == nil { verifiedSince = now }
                 if now - verifiedSince! >= 0.75 {
@@ -321,8 +287,7 @@ func restoreBuiltinDisplayState(_ saved: BuiltinDisplayState) -> DisplayRecovery
                     modeAttempted = true
                     let applied = recoveryModeCommit(display: freshID, saved: saved, mode: available)
                     guard applied.succeeded else {
-                        _ = recoveryCommit(sky, display: freshID, saved: saved, enabled: true)
-                        return result(false, "mode", "Built-in enable committed separately; \(applied.detail)")
+                        return result(false, "mode", "Captured mode could not be restored; \(applied.detail)")
                     }
                 }
             }

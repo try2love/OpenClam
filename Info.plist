@@ -4,8 +4,8 @@
 <key>CFBundleExecutable</key><string>OpenClam</string>
 <key>CFBundleIdentifier</key><string>local.openclam.prototype</string>
 <key>CFBundleName</key><string>OpenClam</string>
-<key>CFBundleVersion</key><string>5</string>
-<key>CFBundleShortVersionString</key><string>0.3.2</string>
+<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleShortVersionString</key><string>0.4.0</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>LSUIElement</key><true/>
