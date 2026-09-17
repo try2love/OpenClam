@@ -293,6 +293,10 @@ static void recoverTarget(NSDictionary *binding, NSNumber *registryID) {
 
 #ifndef OPENCLAM_REBIND_TEST
 int main(int argc, const char **argv) { @autoreleasepool {
+    // A successful session-wide disable can outlive this process when the
+    // shared M3 endpoint disappears. No new transitions until recovery is proven.
+    emit(@"precondition", @{@"result":@"experiment_suspended"});
+    return 3;
     alarm(10);
     if (argc != 3) { fputs("Usage: display-rebind REGISTRY_ID CG_DISPLAY_ID\n", stderr); return 2; }
     uint64_t values[2] = {0};

@@ -114,6 +114,11 @@ int main(int argc, const char **argv) { @autoreleasepool {
     BOOL selectingExternal = argc == 4 && !strcmp(argv[1], "select-external");
     BOOL selectingInternal = argc == 3 && !strcmp(argv[1], "select-internal");
     BOOL quiescing = argc == 3 && !strcmp(argv[1], "quiesce");
+    // Keep release/recovery requests available, but block new overrides and
+    // external selections even when the helper is invoked directly.
+    if (closing || selectingExternal) {
+        emit(@{@"result":@"experiment_suspended"}); return 3;
+    }
     BOOL selecting = selectingExternal || selectingInternal || quiescing;
     if (!closing && !opening && !selecting) {
         fputs("Usage: clamshell-driver identify | open REGISTRY_ID | close REGISTRY_ID | select-external REGISTRY_ID CG_DISPLAY_ID | select-internal REGISTRY_ID | quiesce REGISTRY_ID\n", stderr); return 2;

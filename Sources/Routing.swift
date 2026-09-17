@@ -9,6 +9,11 @@ private var routingInterrupted: sig_atomic_t = 0
 private var routingLogHandle: FileHandle?
 private var routingOutput: FileHandle { routingLogHandle ?? FileHandle.standardError }
 
+// New experiments are suspended after a report that an external output stayed
+// unavailable after app exit and a physical lid close. Keep recovery callable.
+let routingExperimentEnabled = false
+let routingExperimentDisabledMessage = "双外屏实验已停用：发现可能影响外屏后续连接的回归，当前版本不再启动此实验。"
+
 // Enumeration is only a prerequisite for a preview, never proof of scanout.
 func routingTopologyReady(queryOK: Bool, physicallyOpen: Bool, builtinActive: Bool,
                           activeExternalIDs: [UInt32]) -> Bool {
@@ -130,6 +135,9 @@ func routingChild(group: pid_t, timeout: UInt32, command: [String]) -> Never {
 }
 
 func routingGuardian(duration: Double, savedState: String) -> Never {
+    guard routingExperimentEnabled else {
+        print("FAILED:\(routingExperimentDisabledMessage)"); fflush(stdout); exit(2)
+    }
     // The owner can stop every surviving mutator if this guardian itself dies.
     guard setpgid(0, 0) == 0 else { print("FAILED:无法隔离恢复守护进程"); fflush(stdout); exit(0) }
     signal(SIGINT) { _ in routingInterrupted = 1 }
@@ -289,6 +297,7 @@ final class RoutingSession {
     }
 
     func start(duration: Double) -> Bool {
+        guard routingExperimentEnabled else { lastError = routingExperimentDisabledMessage; return false }
         refreshCompletion()
         guard !running else { lastError = "已有双外屏会话正在运行"; return false }
         guard !recoveryUnconfirmed else { lastError = "内屏恢复尚未确认，请先点击恢复内建显示器"; return false }

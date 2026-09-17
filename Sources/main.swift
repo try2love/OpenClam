@@ -249,7 +249,7 @@ final class App: NSObject, NSApplicationDelegate {
         disable = menu.addItem(withTitle: "恢复内建显示器", action: #selector(turnOn), keyEquivalent: "")
         trialItem = menu.addItem(withTitle: "测试关闭 10 秒后恢复", action: #selector(trial), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
-        routeEnable = menu.addItem(withTitle: "启用双外屏模式（实验）", action: #selector(route), keyEquivalent: "")
+        routeEnable = menu.addItem(withTitle: "双外屏实验已停用", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         exportItem = menu.addItem(withTitle: "导出实验报告…", action: #selector(exportReport), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
@@ -280,7 +280,7 @@ final class App: NSObject, NSApplicationDelegate {
         captureSave.title = capture.isRunning ? "结束采样并保存…" : "保存综合采样报告…"
         captureSave.isEnabled = capture.hasReport && !off && !captureSaving
         enable.isEnabled = !off && !recoveryPending && count > 0 && !captureSaving
-        routeEnable.isEnabled = !off && !recoveryPending && count > 0 && !captureSaving
+        routeEnable.isEnabled = false
         trialItem.isEnabled = !captureSaving
         disable.isEnabled = off || recoveryPending || builtinID().map { CGDisplayIsAsleep($0) != 0 } == true
     }
@@ -377,7 +377,7 @@ final class App: NSObject, NSApplicationDelegate {
         guard !routing.running && !session.running && !captureSaving else { return }
         guard let data = routingDiagnosticReport() else {
             let alert = NSAlert(); alert.messageText = "还没有实验记录"
-            alert.informativeText = "运行一次双外屏实验后，即可导出报告。"; alert.runModal(); return
+            alert.informativeText = "没有可导出的历史记录。双外屏实验当前已停用。"; alert.runModal(); return
         }
         let panel = NSSavePanel()
         panel.title = "导出实验报告"
@@ -450,16 +450,8 @@ if args == ["self-test"] {
     exit(result.restored ? 0 : 3)
 } else if args.first == "--routing-guard", args.count == 3, let seconds = Double(args[1]), seconds >= 0, seconds.isFinite {
     routingGuardian(duration: seconds, savedState: args[2])
-} else if args.first == "routing-trial", args.count == 2, let seconds = Double(args[1]),
-          seconds == 0 || (seconds >= 10 && seconds <= 60) {
-    let routing = RoutingSession()
-    emit(["phase": "before", "snapshot": snapshot()])
-    guard routing.start(duration: seconds) else { fputs("\(routing.lastError)\n", stderr); exit(2) }
-    emit(["phase": "routing_preview", "visualConfirmed": false, "snapshot": snapshot()])
-    while routing.running { routing.beat(); Thread.sleep(forTimeInterval: 0.5) }
-    let ok = routing.stop()
-    emit(["phase": "restored", "verifiedLayoutAndWake": ok, "snapshot": snapshot()])
-    exit(ok ? 0 : 3)
+} else if args.first == "routing-trial" {
+    fputs("\(routingExperimentDisabledMessage)\n", stderr); exit(2)
 } else if args.first == "--guard", args.count == 3, let id = UInt32(args[1]), let seconds = Double(args[2]) {
     guardian(id, duration: seconds)
 } else if args == ["diagnostics"] {
